@@ -1,89 +1,73 @@
-name: MedUnity DevSecOps Pipeline
+name: MedUnity PHP Enterprise DevSecOps Pipeline
 
 on:
   push:
     branches: [main, master]
   pull_request:
     branches: [main, master]
-  workflow_dispatch:
 
 permissions:
   security-events: write
   contents: read
-  actions: read
-  issues: write
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
 jobs:
 
-  # =========================================================
-  # SBOM - SYFT
-  # =========================================================
+# =========================================================
+# SBOM
+# =========================================================
   sbom:
-    name: SBOM - Syft
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Syft
         run: |
-          curl -Lo syft.tar.gz https://github.com/anchore/syft/releases/download/v1.0.0/syft_1.0.0_linux_amd64.tar.gz
-          tar -xzf syft.tar.gz
-          sudo mv syft /usr/local/bin/
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
 
       - name: Generate SBOM
         run: syft dir:. -o json > sbom.json
 
-      - name: Upload SBOM
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: sbom
           path: sbom.json
 
 
-  # =========================================================
-  # SAST - PHPSTAN
-  # =========================================================
+# =========================================================
+# SAST - PHPStan
+# =========================================================
   sast-phpstan:
-    name: SAST - PHPStan
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.2'
+          php-version: 8.2
 
-      - name: Install dependencies
-        run: composer install --no-interaction || true
-
-      - name: Install PHPStan
-        run: composer require --dev phpstan/phpstan || true
+      - name: Install deps
+        run: composer install || true
 
       - name: Run PHPStan
         run: |
           mkdir -p reports
           vendor/bin/phpstan analyse . --level=max --error-format=json > reports/phpstan.json || true
 
-      - name: Upload PHPStan report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: phpstan-report
+          name: phpstan
           path: reports/phpstan.json
 
 
-  # =========================================================
-  # SAST - SEMGREP (PHP)
-  # =========================================================
+# =========================================================
+# SAST - SEMGREP (PHP ONLY)
+# =========================================================
   sast-semgrep:
-    name: SAST - Semgrep
     runs-on: ubuntu-latest
-    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4
@@ -91,10 +75,9 @@ jobs:
       - name: Install Semgrep
         run: pip install semgrep
 
-      - name: Run Semgrep PHP scan
+      - name: Scan PHP
         run: |
           mkdir -p reports
-
           semgrep scan \
             --config=p/php \
             --config=p/security-audit \
@@ -102,55 +85,43 @@ jobs:
             --output reports/semgrep.sarif \
             . || true
 
-          semgrep scan \
-            --config=p/php \
-            --config=p/security-audit \
-            --json \
-            --output reports/semgrep.json \
-            . || true
-
-      - name: Upload Semgrep
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: semgrep-results
+          name: semgrep
           path: reports/
 
 
-  # =========================================================
-  # SCA - COMPOSER AUDIT
-  # =========================================================
+# =========================================================
+# SCA - COMPOSER AUDIT
+# =========================================================
   sca-composer:
-    name: SCA - Composer Audit
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.2'
+          php-version: 8.2
 
-      - name: Install dependencies
-        run: composer install --no-interaction || true
+      - name: Install deps
+        run: composer install || true
 
-      - name: Run Composer Audit
+      - name: Composer audit
         run: |
           mkdir -p reports
           composer audit --format=json > reports/composer-audit.json || true
 
-      - name: Upload report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: composer-audit
           path: reports/composer-audit.json
 
 
-  # =========================================================
-  # SCA - TRIVY FS
-  # =========================================================
+# =========================================================
+# SCA - TRIVY FS
+# =========================================================
   sca-trivy:
-    name: SCA - Trivy FS
     runs-on: ubuntu-latest
 
     steps:
@@ -160,147 +131,119 @@ jobs:
         run: |
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
-      - name: Scan filesystem
+      - name: FS Scan
         run: |
           mkdir -p reports
-          trivy fs --severity HIGH,CRITICAL --format json -o reports/trivy-fs.json . || true
+          trivy fs --severity HIGH,CRITICAL --format json \
+            -o reports/trivy.json . || true
 
-      - name: Upload report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: trivy-fs
-          path: reports/trivy-fs.json
+          path: reports/trivy.json
 
 
-  # =========================================================
-  # SECRET SCANNING - GITLEAKS
-  # =========================================================
-  secrets-gitleaks:
-    name: Secret Scanning - Gitleaks
+# =========================================================
+# SECRET SCANNING
+# =========================================================
+  secrets:
     runs-on: ubuntu-latest
-    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Gitleaks
+        run: |
+          mkdir -p reports
+          docker run --rm \
+            -v "$PWD:/repo" \
+            zricethezav/gitleaks \
+            detect --source /repo \
+            --report-format sarif \
+            --report-path /repo/reports/gitleaks.sarif || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks
+          path: reports/gitleaks.sarif
+
+
+# =========================================================
+# SONARQUBE - QUALITY GATE (ENTERPRISE CORE)
+# =========================================================
+  sonar:
+    runs-on: ubuntu-latest
+    needs: [sast-phpstan, sast-semgrep]
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Run Gitleaks
-        run: |
-          mkdir -p reports
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v3
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
 
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE:/repo" \
-            zricethezav/gitleaks:latest \
-            detect \
-            --source /repo \
-            --report-format sarif \
-            --report-path /repo/reports/gitleaks.sarif \
-            || true
-
-          [ -f reports/gitleaks.sarif ] || echo '{"version":"2.1.0","runs":[]}' > reports/gitleaks.sarif
-
-      - name: Upload report
-        uses: actions/upload-artifact@v4
-        with:
-          name: gitleaks
-          path: reports/gitleaks.sarif
+      - name: Quality Gate Check
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
 
-  # =========================================================
-  # CODEQL (PHP)
-  # =========================================================
-  codeql:
-    name: SAST - PHP Security (replaced CodeQL)
+# =========================================================
+# CONTAINER SCAN
+# =========================================================
+  container:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.2'
-
-      - name: Install PHPStan
-        run: composer require --dev phpstan/phpstan || true
-
-      - name: Run PHPStan
-        run: |
-          mkdir -p reports
-          vendor/bin/phpstan analyse . --level=max --error-format=json > reports/phpstan.json || true
-
-      - name: Run Semgrep PHP rules
-        run: |
-          pip install semgrep
-          semgrep scan --config=p/php --config=p/security-audit . \
-            --sarif --output reports/semgrep.sarif || true
-
-      - name: Upload reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: php-sast
-          path: reports/
-  # =========================================================
-  # CONTAINER SCAN - TRIVY
-  # =========================================================
-  container-trivy:
-    name: Container Scan - Trivy
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build images
+      - name: Build
         run: docker compose build
 
       - name: Scan images
         run: |
           mkdir -p reports
-          trivy image --severity HIGH,CRITICAL --format json \
-            -o reports/container-scan.json medunity || true
+          trivy image --severity HIGH,CRITICAL \
+            --format json -o reports/container.json medunity || true
 
-      - name: Upload report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: container-scan
-          path: reports/container-scan.json
+          path: reports/container.json
 
 
-  # =========================================================
-  # IAC SCAN - CHECKOV
-  # =========================================================
-  iac-checkov:
-    name: IaC Scan - Checkov
+# =========================================================
+# IAC CHECKOV
+# =========================================================
+  iac:
     runs-on: ubuntu-latest
-    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Checkov
-        run: pip install checkov
-
-      - name: Scan
+      - name: Checkov
         run: |
+          pip install checkov
           mkdir -p reports
-          checkov --directory . --framework dockerfile,yaml --output json > reports/checkov.json || true
+          checkov -d . --framework dockerfile,yaml \
+            --output json > reports/checkov.json || true
 
-      - name: Upload report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: checkov
           path: reports/checkov.json
 
 
-  # =========================================================
-  # DAST - OWASP ZAP
-  # =========================================================
-  dast-zap:
-    name: DAST - OWASP ZAP
+# =========================================================
+# DAST - ZAP
+# =========================================================
+  dast:
     runs-on: ubuntu-latest
-    needs: [codeql]
-    continue-on-error: true
+    needs: [sonar]
 
     steps:
       - uses: actions/checkout@v4
@@ -308,23 +251,18 @@ jobs:
       - name: Start app
         run: docker compose up -d
 
-      - name: Run ZAP scan
+      - name: ZAP scan
         run: |
           mkdir -p reports
+          docker run --rm --network host \
+            -v $PWD/reports:/zap/wrk \
+            ghcr.io/zaproxy/zaproxy \
+            zap-baseline.py -t http://localhost:8080 \
+            -r zap.html -J zap.json || true
 
-          docker run --rm \
-            -v "$GITHUB_WORKSPACE/reports:/zap/wrk" \
-            --network host \
-            ghcr.io/zaproxy/zaproxy:stable \
-            zap-baseline.py \
-            -t http://localhost:8080 \
-            -J zap.json \
-            -r zap.html || true
-
-      - name: Upload ZAP report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: zap-report
+          name: zap
           path: reports/
 
       - name: Stop app
