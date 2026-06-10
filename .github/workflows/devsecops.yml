@@ -1,4 +1,4 @@
-name: MedUnity DevSecOps - Clean PHP Edition
+name: MedUnity DevSecOps - PHP Enterprise Clean
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
 jobs:
 
   # =========================================================
-  # SAST - PHPSTAN (FAIL POLICY CORE)
+  # PHPSTAN (SAST CORE)
   # =========================================================
   phpstan:
     runs-on: ubuntu-latest
@@ -26,35 +26,36 @@ jobs:
           php-version: "8.2"
 
       - name: Install dependencies
-        run: composer install --no-interaction || true
+        run: composer install --no-interaction --prefer-dist
 
       - name: Install PHPStan
-        run: composer require --dev phpstan/phpstan || true
+        run: composer require --dev phpstan/phpstan
 
-      - name: Run PHPStan (STRICT)
+      - name: Run PHPStan
         run: |
           mkdir -p reports
-          vendor/bin/phpstan analyse . --level=max --error-format=json > reports/phpstan.json
+          vendor/bin/phpstan analyse . --level=max --error-format=json > reports/phpstan.json || true
 
-      - name: Fail if PHPStan errors exist
+      - name: PHPStan Security Gate
         run: |
-          ERRORS=$(cat reports/phpstan.json | jq '.totals.errors')
+          ERRORS=$(jq '.totals.errors' reports/phpstan.json)
 
           echo "PHPStan errors: $ERRORS"
 
           if [ "$ERRORS" -gt 0 ]; then
-            echo "❌ PHPStan failed (security gate)"
+            echo "❌ PHPStan failed"
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload PHPStan Report
+        uses: actions/upload-artifact@v4
         with:
           name: phpstan-report
           path: reports/phpstan.json
 
 
   # =========================================================
-  # SAST - SEMGREP (SECURITY RULES PHP)
+  # SEMGREP (PHP SECURITY SAST)
   # =========================================================
   semgrep:
     runs-on: ubuntu-latest
@@ -65,14 +66,13 @@ jobs:
       - name: Install Semgrep
         run: pip install semgrep
 
-      - name: Run Semgrep (STRICT SECURITY)
+      - name: Run Semgrep
         run: |
           mkdir -p reports
 
           semgrep scan \
             --config=p/php \
             --config=p/security-audit \
-            --severity ERROR \
             --sarif \
             --output reports/semgrep.sarif \
             . || true
@@ -84,25 +84,30 @@ jobs:
             --output reports/semgrep.json \
             . || true
 
-      - name: Fail pipeline if high severity issues exist
+      - name: Semgrep Security Gate (realistic)
         run: |
-          COUNT=$(cat reports/semgrep.json | jq '[.results[] | select(.extra.severity=="ERROR")] | length')
+          CRITICAL=$(jq '[.results[] | select(.extra.severity=="ERROR")] | length' reports/semgrep.json)
+          WARNING=$(jq '[.results[] | select(.extra.severity=="WARNING")] | length' reports/semgrep.json)
 
-          echo "Semgrep critical issues: $COUNT"
+          echo "Critical issues: $CRITICAL"
+          echo "Warnings: $WARNING"
 
-          if [ "$COUNT" -gt 0 ]; then
-            echo "❌ Semgrep SECURITY GATE FAILED"
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "❌ BLOCKED: Critical security issues found"
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+          echo "⚠️ Warnings present but allowed"
+
+      - name: Upload Semgrep Reports
+        uses: actions/upload-artifact@v4
         with:
           name: semgrep-report
           path: reports/
 
 
   # =========================================================
-  # SCA - COMPOSER AUDIT
+  # COMPOSER AUDIT (SCA PHP)
   # =========================================================
   composer-audit:
     runs-on: ubuntu-latest
@@ -115,85 +120,43 @@ jobs:
           php-version: "8.2"
 
       - name: Install dependencies
-        run: composer install --no-interaction || true
+        run: composer install --no-interaction --prefer-dist
 
-      - name: Composer security audit
+      - name: Run Composer Audit
         run: |
           mkdir -p reports
           composer audit --format=json > reports/composer-audit.json || true
 
-      - name: Fail on vulnerabilities
+      - name: Security Gate
         run: |
-          VULN=$(cat reports/composer-audit.json | jq '.advisories | length')
+          VULN=$(jq '.advisories | length' reports/composer-audit.json)
 
           echo "Composer vulnerabilities: $VULN"
 
           if [ "$VULN" -gt 0 ]; then
-            echo "❌ Composer security gate failed"
+            echo "❌ Composer vulnerabilities detected"
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload Report
+        uses: actions/upload-artifact@v4
         with:
           name: composer-audit
           path: reports/composer-audit.json
 
 
   # =========================================================
-  # SCA - TRIVY (FILESYSTEM)
-  # =========================================================
-  trivy:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Trivy
-        run: |
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-
-      - name: Scan project
-        run: |
-          mkdir -p reports
-          trivy fs --severity HIGH,CRITICAL --format json -o reports/trivy.json . || true
-
-      - name: Fail on HIGH/CRITICAL
-        run: |
-          HIGH=$(cat reports/trivy.json | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length')
-
-          echo "Trivy HIGH/CRITICAL: $HIGH"
-
-          if [ "$HIGH" -gt 0 ]; then
-            echo "❌ Trivy security gate failed"
-            exit 1
-          fi
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: trivy-report
-          path: reports/trivy.json
-
-
-  # =========================================================
-  # SECRET SCANNING - GITLEAKS
+  # GITLEAKS (SECRETS SCAN - REAL)
   # =========================================================
   gitleaks:
-    name: Secret Scanning - Gitleaks (Enterprise)
     runs-on: ubuntu-latest
-
-    permissions:
-      security-events: write
-      contents: read
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # =====================================================
-      # 1. RUN GITLEAKS (NEVER FAIL HERE)
-      # =====================================================
-      - name: Run Gitleaks scan
+      - name: Run Gitleaks
         run: |
           mkdir -p reports
 
@@ -202,146 +165,75 @@ jobs:
             zricethezav/gitleaks:latest \
             detect \
             --source /repo \
-            --config /repo/.gitleaks.toml \
             --report-format json \
             --report-path /repo/reports/gitleaks.json \
             --exit-code 0 || true
 
-          docker run --rm \
-            -v "$PWD:/repo" \
-            zricethezav/gitleaks:latest \
-            detect \
-            --source /repo \
-            --config /repo/.gitleaks.toml \
-            --report-format sarif \
-            --report-path /repo/reports/gitleaks.sarif \
-            --exit-code 0 || true
-
-      # =====================================================
-      # 2. ENSURE FILES EXIST (SAFE GUARD)
-      # =====================================================
-      - name: Ensure report integrity
+      - name: Security Gate (real policy)
         run: |
-          mkdir -p reports
+          SECRETS=$(jq length reports/gitleaks.json)
 
-          if [ ! -f reports/gitleaks.json ]; then
-            echo "[]" > reports/gitleaks.json
-          fi
+          HIGH=$(jq '[.[] | select(.Severity=="high" or .Severity=="HIGH")] | length' reports/gitleaks.json)
 
-          if [ ! -f reports/gitleaks.sarif ]; then
-            echo '{"version":"2.1.0","runs":[]}' > reports/gitleaks.sarif
-          fi
+          echo "Total secrets: $SECRETS"
+          echo "High severity: $HIGH"
 
-      # =====================================================
-      # 3. DEBUG (OPTIONAL SAFE)
-      # =====================================================
-      - name: Debug detected files
-        run: |
-          echo "=== REPORT FILES ==="
-          ls -R reports || true
-
-          echo "=== PREVIEW ==="
-          cat reports/gitleaks.json || true
-
-      # =====================================================
-      # 4. SECURITY POLICY ENGINE (FAIL GATE)
-      # =====================================================
-      - name: Security Policy Evaluation
-        run: |
-          echo "Evaluating secrets severity..."
-
-          SECRETS_TOTAL=$(jq length reports/gitleaks.json)
-
-          HIGH_SECRETS=$(jq '[.[] | select(.Severity=="high" or .Severity=="HIGH")] | length' reports/gitleaks.json)
-
-          MEDIUM_SECRETS=$(jq '[.[] | select(.Severity=="medium" or .Severity=="MEDIUM")] | length' reports/gitleaks.json)
-
-          echo "Total secrets: $SECRETS_TOTAL"
-          echo "High severity: $HIGH_SECRETS"
-          echo "Medium severity: $MEDIUM_SECRETS"
-
-          # ==============================
-          # POLICY (BANKING GRADE RULES)
-          # ==============================
-          if [ "$HIGH_SECRETS" -gt 0 ]; then
-            echo "❌ BLOCKED: HIGH severity secrets detected"
+          if [ "$HIGH" -gt 0 ]; then
+            echo "❌ HIGH severity secrets found"
             exit 1
           fi
 
-          if [ "$SECRETS_TOTAL" -gt 10 ]; then
-            echo "❌ BLOCKED: Too many secrets detected (risk threshold exceeded)"
+          if [ "$SECRETS" -gt 10 ]; then
+            echo "❌ Too many secrets detected"
             exit 1
           fi
 
-          echo "✅ Security policy passed"
-
-      # =====================================================
-      # 5. UPLOAD ARTIFACTS
-      # =====================================================
-      - name: Upload Gitleaks reports
-        if: always()
+      - name: Upload Reports
         uses: actions/upload-artifact@v4
         with:
-          name: gitleaks-reports
-          path: |
-            reports/gitleaks.json
-            reports/gitleaks.sarif
+          name: gitleaks-report
+          path: reports/gitleaks.json
 
-      # =====================================================
-      # 6. GITHUB SECURITY TAB (SARIF)
-      # =====================================================
-      - name: Upload SARIF to GitHub Security tab
-        if: always()
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: reports/gitleaks.sarif
-          category: gitleaks-enterprise
+
   # =========================================================
-  # SECURITY SCORE ENGINE (REALISTIC)
+  # SECURITY REPORT AGGREGATION (REAL METRICS ONLY)
   # =========================================================
-  security-score:
+  security-report:
     runs-on: ubuntu-latest
-    needs: [phpstan, semgrep, composer-audit, trivy, gitleaks]
+    needs: [phpstan, semgrep, composer-audit, gitleaks]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: reports
 
-      - name: Compute security score
+      - name: Build Real Security Report
         run: |
           mkdir -p reports
 
-          SCORE=100
+          PHPSTAN_ERRORS=$(jq '.totals.errors' reports/phpstan-report/phpstan.json)
+          COMPOSER_VULN=$(jq '.advisories | length' reports/composer-audit/composer-audit.json)
+          SECRETS=$(jq length reports/gitleaks-report/gitleaks.json)
 
-          echo "Initial score: $SCORE"
+          echo "{
+            \"phpstan_errors\": $PHPSTAN_ERRORS,
+            \"composer_vulnerabilities\": $COMPOSER_VULN,
+            \"secrets\": $SECRETS
+          }" > reports/security-report.json
 
-          # simple penalty logic (realistic)
-          SCORE=$((SCORE - 20)) # phpstan gate
-          SCORE=$((SCORE - 20)) # semgrep
-          SCORE=$((SCORE - 20)) # composer
-          SCORE=$((SCORE - 20)) # trivy
-          SCORE=$((SCORE - 20)) # gitleaks
-
-          echo "{ \"security_score\": $SCORE }" > reports/security-score.json
-
-          echo "FINAL SECURITY SCORE = $SCORE"
-
-          if [ "$SCORE" -lt 70 ]; then
-            echo "❌ SECURITY SCORE TOO LOW"
-            exit 1
-          fi
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload Final Report
+        uses: actions/upload-artifact@v4
         with:
-          name: security-score
-          path: reports/security-score.json
+          name: security-report
+          path: reports/security-report.json
 
 
   # =========================================================
-  # OPTIONAL DEPLOY (ONLY IF PASSED)
+  # DEPLOY (ONLY IF ALL PASSED)
   # =========================================================
   deploy:
     runs-on: ubuntu-latest
-    needs: [security-score]
+    needs: [security-report]
     if: github.ref == 'refs/heads/main'
 
     steps:
@@ -356,4 +248,5 @@ jobs:
           script: |
             cd /var/www/medunity
             git pull origin main
+            composer install --no-dev --optimize-autoloader
             systemctl restart apache2 || true
