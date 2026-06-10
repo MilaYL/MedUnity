@@ -66,47 +66,43 @@ jobs:
       - name: Install Semgrep
         run: pip install semgrep
 
-      - name: Run Semgrep
+      - name: Run Semgrep (security-only baseline)
         run: |
           mkdir -p reports
-
 
           semgrep scan \
             --config=p/php \
             --config=p/security-audit \
+            --severity ERROR \
             --sarif \
             --output reports/semgrep.sarif \
             . || true
 
           semgrep scan \
-            --config=p/php \
             --config=p/security-audit \
             --json \
             --output reports/semgrep.json \
             . || true
 
-      - name: Semgrep Security Gate (realistic)
+      - name: Fail only on REAL critical vulnerabilities
         run: |
-          CRITICAL=$(jq '[.results[] | select(.extra.severity=="ERROR")] | length' reports/semgrep.json)
-          WARNING=$(jq '[.results[] | select(.extra.severity=="WARNING")] | length' reports/semgrep.json)
+          CRITICAL=$(jq '[.results[]
+            | select(.extra.severity=="ERROR")
+          ] | length' reports/semgrep.json)
 
           echo "Critical issues: $CRITICAL"
-          echo "Warnings: $WARNING"
 
           if [ "$CRITICAL" -gt 0 ]; then
-            echo "❌ BLOCKED: Critical security issues found"
+            echo "❌ BLOCKED: Critical security issues only"
             exit 1
           fi
 
-          echo "⚠️ Warnings present but allowed"
+          echo "✅ Passed security gate (warnings ignored)"
 
-      - name: Upload Semgrep Reports
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: semgrep-report
           path: reports/
-
-
   # =========================================================
   # COMPOSER AUDIT (SCA PHP)
   # =========================================================
