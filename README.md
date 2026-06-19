@@ -1,4 +1,4 @@
-git init# Système de Gestion de Clinique Privée
+# Système de Gestion de Clinique Privée
 
 ##  Description
 
